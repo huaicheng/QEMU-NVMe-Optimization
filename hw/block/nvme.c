@@ -33,6 +33,7 @@
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "sysemu/block-backend.h"
+#include "exec/memory.h"
 
 #include "qemu/log.h"
 #include "trace.h"
@@ -244,6 +245,14 @@ static uint16_t nvme_dma_read_prp(NvmeCtrl *n, uint8_t *ptr, uint32_t len,
     return status;
 }
 
+static void nvme_update_cq_head(NvmeCQueue *cq)
+{
+	if (cq->db_addr) {
+		pci_dma_read(&cq->ctrl->parent_obj, cq->db_addr, &cq->head,
+				sizeof(cq->head));
+	}
+}
+
 static void nvme_post_cqes(void *opaque)
 {
     NvmeCQueue *cq = opaque;
@@ -253,6 +262,8 @@ static void nvme_post_cqes(void *opaque)
     QTAILQ_FOREACH_SAFE(req, &cq->req_list, entry, next) {
         NvmeSQueue *sq;
         hwaddr addr;
+
+		nvme_update_cq_head(cq);
 
         if (nvme_cq_full(cq)) {
             break;
@@ -480,6 +491,9 @@ static void nvme_init_sq(NvmeSQueue *sq, NvmeCtrl *n, uint64_t dma_addr,
     }
     sq->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, nvme_process_sq, sq);
 
+	sq->db_addr = 0;
+	sq->eventidx_addr = 0;
+
     assert(n->cq[cqid]);
     cq = n->cq[cqid];
     QTAILQ_INSERT_TAIL(&(cq->sq_list), sq, entry);
@@ -569,9 +583,49 @@ static void nvme_init_cq(NvmeCQueue *cq, NvmeCtrl *n, uint64_t dma_addr,
     cq->head = cq->tail = 0;
     QTAILQ_INIT(&cq->req_list);
     QTAILQ_INIT(&cq->sq_list);
+	cq->db_addr = 0;
+	cq->eventidx_addr = 0;
     msix_vector_use(&n->parent_obj, cq->vector);
     n->cq[cqid] = cq;
     cq->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, nvme_post_cqes, cq);
+}
+
+static uint16_t nvme_doorbell_buffer_config(NvmeCtrl *n, const NvmeCmd *cmd)
+{
+	uint64_t db_addr = le64_to_cpu(cmd->prp1);
+	uint64_t eventidx_addr = le64_to_cpu(cmd->prp2);
+	int i;
+
+	printf("Coperd,%s!\n", __func__);
+	/* Address should not be NULL and should be page aligned */
+	if (db_addr == 0 || db_addr & (n->page_size - 1) ||
+			eventidx_addr == 0 || eventidx_addr & (n->page_size - 1)) {
+		printf("Coperd,db_addr ERROR!\n");
+		return NVME_INVALID_MEMORY_ADDRESS | NVME_DNR;
+	}
+
+	/* This assumes all I/O queues are created before this command is handled.
+	 * We skip the admin queues.
+	 */
+	for (i = 1; i < n->num_queues; i++) {
+		NvmeSQueue *sq = n->sq[i];
+		NvmeCQueue *cq = n->cq[i];
+
+		if (sq != NULL) {
+			/* Submission queue tail pointer location, 2 * QID * stride */
+			sq->db_addr = db_addr + 2 * i * 4;
+			sq->eventidx_addr = eventidx_addr + 2 * i * 4;
+			printf("Coperd,set sq[%d].db_addr=%ld,ei_addr=%ld\n", i, sq->db_addr, sq->eventidx_addr);
+		}
+
+		if (cq != NULL) {
+			/* Completion queue head pointer location, (2 * QID + 1) * stride */
+			cq->db_addr = db_addr + (2 * i + 1) * 4;
+			cq->eventidx_addr = eventidx_addr + (2 * i + 1) * 4;
+			printf("Coperd,set cq[%d].db_addr=%ld,ei_addr=%ld\n", i, cq->db_addr, cq->eventidx_addr);
+		}
+	}
+	return NVME_SUCCESS;
 }
 
 static uint16_t nvme_create_cq(NvmeCtrl *n, NvmeCmd *cmd)
@@ -753,10 +807,29 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return nvme_set_feature(n, cmd, req);
     case NVME_ADM_CMD_GET_FEATURES:
         return nvme_get_feature(n, cmd, req);
+	case NVME_ADM_CMD_DOORBELL_BUFFER_CONFIG:
+		printf("Coperd,============QEMU handles DBBUF CONFIG cmd!========\n");
+		return nvme_doorbell_buffer_config(n, cmd);
     default:
         trace_nvme_err_invalid_admin_opc(cmd->opcode);
         return NVME_INVALID_OPCODE | NVME_DNR;
     }
+}
+
+static void nvme_update_sq_eventidx(const NvmeSQueue *sq)
+{
+	if (sq->eventidx_addr) {
+		pci_dma_write(&sq->ctrl->parent_obj, sq->eventidx_addr, &sq->tail,
+				sizeof(sq->tail));
+	}
+}
+
+static void nvme_update_sq_tail(NvmeSQueue *sq)
+{
+	if (sq->db_addr) {
+		pci_dma_read(&sq->ctrl->parent_obj, sq->db_addr, &sq->tail,
+				sizeof(sq->tail));
+	}
 }
 
 static void nvme_process_sq(void *opaque)
@@ -769,6 +842,8 @@ static void nvme_process_sq(void *opaque)
     hwaddr addr;
     NvmeCmd cmd;
     NvmeRequest *req;
+
+	nvme_update_sq_tail(sq);
 
     while (!(nvme_sq_empty(sq) || QTAILQ_EMPTY(&sq->req_list))) {
         addr = sq->dma_addr + sq->head * n->sqe_size;
@@ -787,6 +862,9 @@ static void nvme_process_sq(void *opaque)
             req->status = status;
             nvme_enqueue_req_completion(cq, req);
         }
+
+		nvme_update_sq_eventidx(sq);
+		nvme_update_sq_tail(sq);
     }
 }
 
@@ -1105,7 +1183,12 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
         }
 
         start_sqs = nvme_cq_full(cq) ? 1 : 0;
-        cq->head = new_head;
+		/* When the mapped pointer memory area is setup, we don't rely on the
+		 * MMIO written values to update the head pointer
+		 */
+		if (!cq->db_addr) {
+			cq->head = new_head;
+		}
         if (start_sqs) {
             NvmeSQueue *sq;
             QTAILQ_FOREACH(sq, &cq->sq_list, entry) {
@@ -1142,7 +1225,12 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
             return;
         }
 
-        sq->tail = new_tail;
+		/* When the mapped pointer memory area is setup, we don't rely on the
+		 * MMIO written values to update the tail pointer
+		 */
+		if (!sq->db_addr) {
+			sq->tail = new_tail;
+		}
         timer_mod(sq->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 500);
     }
 }
@@ -1256,7 +1344,7 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
     id->ieee[0] = 0x00;
     id->ieee[1] = 0x02;
     id->ieee[2] = 0xb3;
-    id->oacs = cpu_to_le16(0);
+    id->oacs = cpu_to_le16(NVME_OACS_DBBUF);
     id->frmw = 7 << 1;
     id->lpa = 1 << 0;
     id->sqes = (0x6 << 4) | 0x6;

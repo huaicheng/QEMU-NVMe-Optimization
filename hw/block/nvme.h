@@ -33,6 +33,17 @@ typedef struct NvmeSQueue {
     QTAILQ_HEAD(sq_req_list, NvmeRequest) req_list;
     QTAILQ_HEAD(out_req_list, NvmeRequest) out_req_list;
     QTAILQ_ENTRY(NvmeSQueue) entry;
+	/*
+	 * Mapped memory location where the tail pointer is stored by the guest
+	 * without triggering MMIO exits
+	 */
+	uint64_t	db_addr;
+	/*
+	 * virtio-like eventidx pointer, guest updates to the tail pointer that do
+	 * not go over this vallue will not result in MMIO writes (but will still
+	 * write the tail pointer to the "db_addr" location above)
+	 */
+	uint64_t	eventidx_addr;
 } NvmeSQueue;
 
 typedef struct NvmeCQueue {
@@ -48,6 +59,17 @@ typedef struct NvmeCQueue {
     QEMUTimer   *timer;
     QTAILQ_HEAD(sq_list, NvmeSQueue) sq_list;
     QTAILQ_HEAD(cq_req_list, NvmeRequest) req_list;
+	/*
+	 * Mapped memory location where the tail pointer is stored by the guest
+	 * without triggering MMIO exits
+	 */
+	uint64_t	db_addr;
+	/*
+	 * virtio-like eventidx pointer, guest updates to the tail pointer that do
+	 * not go over this vallue will not result in MMIO writes (but will still
+	 * write the tail pointer to the "db_addr" location above)
+	 */
+	uint64_t	eventidx_addr;
 } NvmeCQueue;
 
 typedef struct NvmeNamespace {
