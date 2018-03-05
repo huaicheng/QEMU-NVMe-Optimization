@@ -110,6 +110,9 @@ typedef struct NvmeCtrl {
     NvmeSQueue      admin_sq;
     NvmeCQueue      admin_cq;
     NvmeIdCtrl      id_ctrl;
+
+	uint64_t		dbbuf_dbs; // Coperd
+	uint64_t		dbbuf_eis;
 } NvmeCtrl;
 
 #endif /* HW_NVME_H */

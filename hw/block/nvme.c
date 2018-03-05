@@ -9,7 +9,7 @@
  */
 
 /**
- * Reference Specs: http://www.nvmexpress.org, 1.2, 1.1, 1.0e
+ * Reference Specs: http://www.nvmexpress.org, 1.3, 1.2, 1.1, 1.0e
  *
  *  http://www.nvmexpress.org/resources/
  */
@@ -491,8 +491,11 @@ static void nvme_init_sq(NvmeSQueue *sq, NvmeCtrl *n, uint64_t dma_addr,
     }
     sq->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, nvme_process_sq, sq);
 
-	sq->db_addr = 0;
-	sq->eventidx_addr = 0;
+	if (sqid && n->dbbuf_dbs && n->dbbuf_eis) {
+		sq->db_addr = n->dbbuf_dbs + 2 * sqid * (4 << NVME_CAP_DSTRD(n->bar.cap));
+		sq->eventidx_addr = n->dbbuf_eis + 2 * sqid * (4 << NVME_CAP_DSTRD(n->bar.cap));
+		printf("Coperd,%s,set sq[%d].db_addr=%ld,ei_addr=%ld\n", __func__, sqid, sq->db_addr, sq->eventidx_addr);
+	}
 
     assert(n->cq[cqid]);
     cq = n->cq[cqid];
@@ -573,21 +576,25 @@ static uint16_t nvme_del_cq(NvmeCtrl *n, NvmeCmd *cmd)
 static void nvme_init_cq(NvmeCQueue *cq, NvmeCtrl *n, uint64_t dma_addr,
     uint16_t cqid, uint16_t vector, uint16_t size, uint16_t irq_enabled)
 {
-    cq->ctrl = n;
-    cq->cqid = cqid;
-    cq->size = size;
-    cq->dma_addr = dma_addr;
-    cq->phase = 1;
-    cq->irq_enabled = irq_enabled;
-    cq->vector = vector;
-    cq->head = cq->tail = 0;
-    QTAILQ_INIT(&cq->req_list);
-    QTAILQ_INIT(&cq->sq_list);
-	cq->db_addr = 0;
-	cq->eventidx_addr = 0;
-    msix_vector_use(&n->parent_obj, cq->vector);
-    n->cq[cqid] = cq;
-    cq->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, nvme_post_cqes, cq);
+	cq->ctrl = n;
+	cq->cqid = cqid;
+	cq->size = size;
+	cq->dma_addr = dma_addr;
+	cq->phase = 1;
+	cq->irq_enabled = irq_enabled;
+	cq->vector = vector;
+	cq->head = cq->tail = 0;
+	QTAILQ_INIT(&cq->req_list);
+	QTAILQ_INIT(&cq->sq_list);
+	printf("Coperd,DSTRD=%ld\n", NVME_CAP_DSTRD(n->bar.cap));
+	if (cqid && n->dbbuf_dbs && n->dbbuf_eis) {
+		cq->db_addr = n->dbbuf_dbs + (2 * cqid + 1) * (4 << NVME_CAP_DSTRD(n->bar.cap));
+		cq->eventidx_addr = n->dbbuf_eis + (2 * cqid + 1) * (4 << NVME_CAP_DSTRD(n->bar.cap));
+		printf("Coperd,%s,set cq[%d].db_addr=%ld,ei_addr=%ld\n", __func__, cqid, cq->db_addr, cq->eventidx_addr);
+	}
+	msix_vector_use(&n->parent_obj, cq->vector);
+	n->cq[cqid] = cq;
+	cq->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, nvme_post_cqes, cq);
 }
 
 static uint16_t nvme_doorbell_buffer_config(NvmeCtrl *n, const NvmeCmd *cmd)
@@ -596,13 +603,17 @@ static uint16_t nvme_doorbell_buffer_config(NvmeCtrl *n, const NvmeCmd *cmd)
 	uint64_t eventidx_addr = le64_to_cpu(cmd->prp2);
 	int i;
 
-	printf("Coperd,%s!\n", __func__);
+	printf("Coperd,%s ============START!==============\n", __func__);
 	/* Address should not be NULL and should be page aligned */
 	if (db_addr == 0 || db_addr & (n->page_size - 1) ||
 			eventidx_addr == 0 || eventidx_addr & (n->page_size - 1)) {
 		printf("Coperd,db_addr ERROR!\n");
 		return NVME_INVALID_MEMORY_ADDRESS | NVME_DNR;
 	}
+
+	n->dbbuf_dbs = db_addr;
+	n->dbbuf_eis = eventidx_addr;
+	//return NVME_SUCCESS;
 
 	/* This assumes all I/O queues are created before this command is handled.
 	 * We skip the admin queues.
@@ -611,20 +622,21 @@ static uint16_t nvme_doorbell_buffer_config(NvmeCtrl *n, const NvmeCmd *cmd)
 		NvmeSQueue *sq = n->sq[i];
 		NvmeCQueue *cq = n->cq[i];
 
-		if (sq != NULL) {
+		if (sq) {
 			/* Submission queue tail pointer location, 2 * QID * stride */
-			sq->db_addr = db_addr + 2 * i * 4;
+			sq->db_addr = db_addr + 2 * i * (4 << NVME_CAP_DSTRD(n->bar.cap));
 			sq->eventidx_addr = eventidx_addr + 2 * i * 4;
-			printf("Coperd,set sq[%d].db_addr=%ld,ei_addr=%ld\n", i, sq->db_addr, sq->eventidx_addr);
+			printf("Coperd,%s,set sq[%d].db_addr=%ld,ei_addr=%ld\n", __func__, i, sq->db_addr, sq->eventidx_addr);
 		}
 
-		if (cq != NULL) {
+		if (cq) {
 			/* Completion queue head pointer location, (2 * QID + 1) * stride */
 			cq->db_addr = db_addr + (2 * i + 1) * 4;
-			cq->eventidx_addr = eventidx_addr + (2 * i + 1) * 4;
-			printf("Coperd,set cq[%d].db_addr=%ld,ei_addr=%ld\n", i, cq->db_addr, cq->eventidx_addr);
+			cq->eventidx_addr = eventidx_addr + (2 * i + 1) * (4 << NVME_CAP_DSTRD(n->bar.cap));
+			printf("Coperd,%s,set cq[%d].db_addr=%ld,ei_addr=%ld\n", __func__, i, cq->db_addr, cq->eventidx_addr);
 		}
 	}
+	printf("Coperd,%s ============END!================\n", __func__);
 	return NVME_SUCCESS;
 }
 
@@ -735,6 +747,7 @@ static uint16_t nvme_identify(NvmeCtrl *n, NvmeCmd *cmd)
     case 0x00:
         return nvme_identify_ns(n, c);
     case 0x01:
+		printf("Coperd,%s,to do nvme_identify_ctrl\n", __func__);
         return nvme_identify_ctrl(n, c);
     case 0x02:
         return nvme_identify_nslist(n, c);
@@ -794,21 +807,27 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     switch (cmd->opcode) {
     case NVME_ADM_CMD_DELETE_SQ:
+		printf("Coperd,delete_sq\n");
         return nvme_del_sq(n, cmd);
     case NVME_ADM_CMD_CREATE_SQ:
+		printf("Coperd,create_sq\n");
         return nvme_create_sq(n, cmd);
     case NVME_ADM_CMD_DELETE_CQ:
+		printf("Coperd,delete_cq\n");
         return nvme_del_cq(n, cmd);
     case NVME_ADM_CMD_CREATE_CQ:
+		printf("Coperd,create_cq\n");
         return nvme_create_cq(n, cmd);
     case NVME_ADM_CMD_IDENTIFY:
+		printf("Coperd,identify\n");
         return nvme_identify(n, cmd);
     case NVME_ADM_CMD_SET_FEATURES:
+		printf("Coperd,set_feature\n");
         return nvme_set_feature(n, cmd, req);
     case NVME_ADM_CMD_GET_FEATURES:
+		printf("Coperd,get_feature\n");
         return nvme_get_feature(n, cmd, req);
 	case NVME_ADM_CMD_DOORBELL_BUFFER_CONFIG:
-		printf("Coperd,============QEMU handles DBBUF CONFIG cmd!========\n");
 		return nvme_doorbell_buffer_config(n, cmd);
     default:
         trace_nvme_err_invalid_admin_opc(cmd->opcode);
@@ -1408,6 +1427,9 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
             cpu_to_le64(n->ns_size >>
                 id_ns->lbaf[NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas)].ds);
     }
+
+	n->dbbuf_dbs = 0;
+	n->dbbuf_eis = 0;
 }
 
 static void nvme_exit(PCIDevice *pci_dev)
