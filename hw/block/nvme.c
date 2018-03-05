@@ -493,8 +493,8 @@ static void nvme_init_sq(NvmeSQueue *sq, NvmeCtrl *n, uint64_t dma_addr,
 
 	if (sqid && n->dbbuf_dbs && n->dbbuf_eis) {
 		sq->db_addr = n->dbbuf_dbs + 2 * sqid * (4 << NVME_CAP_DSTRD(n->bar.cap));
-		sq->eventidx_addr = n->dbbuf_eis + 2 * sqid * (4 << NVME_CAP_DSTRD(n->bar.cap));
-		printf("Coperd,%s,set sq[%d].db_addr=%ld,ei_addr=%ld\n", __func__, sqid, sq->db_addr, sq->eventidx_addr);
+		sq->ei_addr = n->dbbuf_eis + 2 * sqid * (4 << NVME_CAP_DSTRD(n->bar.cap));
+		printf("Coperd,%s,set sq[%d].db_addr=%ld,ei_addr=%ld\n", __func__, sqid, sq->db_addr, sq->ei_addr);
 	}
 
     assert(n->cq[cqid]);
@@ -589,30 +589,30 @@ static void nvme_init_cq(NvmeCQueue *cq, NvmeCtrl *n, uint64_t dma_addr,
 	printf("Coperd,DSTRD=%ld\n", NVME_CAP_DSTRD(n->bar.cap));
 	if (cqid && n->dbbuf_dbs && n->dbbuf_eis) {
 		cq->db_addr = n->dbbuf_dbs + (2 * cqid + 1) * (4 << NVME_CAP_DSTRD(n->bar.cap));
-		cq->eventidx_addr = n->dbbuf_eis + (2 * cqid + 1) * (4 << NVME_CAP_DSTRD(n->bar.cap));
-		printf("Coperd,%s,set cq[%d].db_addr=%ld,ei_addr=%ld\n", __func__, cqid, cq->db_addr, cq->eventidx_addr);
+		cq->ei_addr = n->dbbuf_eis + (2 * cqid + 1) * (4 << NVME_CAP_DSTRD(n->bar.cap));
+		printf("Coperd,%s,set cq[%d].db_addr=%ld,ei_addr=%ld\n", __func__, cqid, cq->db_addr, cq->ei_addr);
 	}
 	msix_vector_use(&n->parent_obj, cq->vector);
 	n->cq[cqid] = cq;
 	cq->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, nvme_post_cqes, cq);
 }
 
-static uint16_t nvme_doorbell_buffer_config(NvmeCtrl *n, const NvmeCmd *cmd)
+static uint16_t nvme_dbbuf_config(NvmeCtrl *n, const NvmeCmd *cmd)
 {
 	uint64_t db_addr = le64_to_cpu(cmd->prp1);
-	uint64_t eventidx_addr = le64_to_cpu(cmd->prp2);
+	uint64_t ei_addr = le64_to_cpu(cmd->prp2);
 	int i;
 
 	printf("Coperd,%s ============START!==============\n", __func__);
 	/* Address should not be NULL and should be page aligned */
 	if (db_addr == 0 || db_addr & (n->page_size - 1) ||
-			eventidx_addr == 0 || eventidx_addr & (n->page_size - 1)) {
+			ei_addr == 0 || ei_addr & (n->page_size - 1)) {
 		printf("Coperd,db_addr ERROR!\n");
 		return NVME_INVALID_MEMORY_ADDRESS | NVME_DNR;
 	}
 
 	n->dbbuf_dbs = db_addr;
-	n->dbbuf_eis = eventidx_addr;
+	n->dbbuf_eis = ei_addr;
 	//return NVME_SUCCESS;
 
 	/* This assumes all I/O queues are created before this command is handled.
@@ -625,15 +625,15 @@ static uint16_t nvme_doorbell_buffer_config(NvmeCtrl *n, const NvmeCmd *cmd)
 		if (sq) {
 			/* Submission queue tail pointer location, 2 * QID * stride */
 			sq->db_addr = db_addr + 2 * i * (4 << NVME_CAP_DSTRD(n->bar.cap));
-			sq->eventidx_addr = eventidx_addr + 2 * i * 4;
-			printf("Coperd,%s,set sq[%d].db_addr=%ld,ei_addr=%ld\n", __func__, i, sq->db_addr, sq->eventidx_addr);
+			sq->ei_addr = ei_addr + 2 * i * 4;
+			printf("Coperd,%s,set sq[%d].db_addr=%ld,ei_addr=%ld\n", __func__, i, sq->db_addr, sq->ei_addr);
 		}
 
 		if (cq) {
 			/* Completion queue head pointer location, (2 * QID + 1) * stride */
 			cq->db_addr = db_addr + (2 * i + 1) * 4;
-			cq->eventidx_addr = eventidx_addr + (2 * i + 1) * (4 << NVME_CAP_DSTRD(n->bar.cap));
-			printf("Coperd,%s,set cq[%d].db_addr=%ld,ei_addr=%ld\n", __func__, i, cq->db_addr, cq->eventidx_addr);
+			cq->ei_addr = ei_addr + (2 * i + 1) * (4 << NVME_CAP_DSTRD(n->bar.cap));
+			printf("Coperd,%s,set cq[%d].db_addr=%ld,ei_addr=%ld\n", __func__, i, cq->db_addr, cq->ei_addr);
 		}
 	}
 	printf("Coperd,%s ============END!================\n", __func__);
@@ -827,8 +827,8 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     case NVME_ADM_CMD_GET_FEATURES:
 		printf("Coperd,get_feature\n");
         return nvme_get_feature(n, cmd, req);
-	case NVME_ADM_CMD_DOORBELL_BUFFER_CONFIG:
-		return nvme_doorbell_buffer_config(n, cmd);
+	case NVME_ADM_CMD_DBBUF_CONFIG:
+		return nvme_dbbuf_config(n, cmd);
     default:
         trace_nvme_err_invalid_admin_opc(cmd->opcode);
         return NVME_INVALID_OPCODE | NVME_DNR;
@@ -837,8 +837,8 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 
 static void nvme_update_sq_eventidx(const NvmeSQueue *sq)
 {
-	if (sq->eventidx_addr) {
-		pci_dma_write(&sq->ctrl->parent_obj, sq->eventidx_addr, &sq->tail,
+	if (sq->ei_addr) {
+		pci_dma_write(&sq->ctrl->parent_obj, sq->ei_addr, &sq->tail,
 				sizeof(sq->tail));
 	}
 }
