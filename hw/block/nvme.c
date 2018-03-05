@@ -494,7 +494,6 @@ static void nvme_init_sq(NvmeSQueue *sq, NvmeCtrl *n, uint64_t dma_addr,
 	if (sqid && n->dbbuf_dbs && n->dbbuf_eis) {
 		sq->db_addr = n->dbbuf_dbs + 2 * sqid * (4 << NVME_CAP_DSTRD(n->bar.cap));
 		sq->ei_addr = n->dbbuf_eis + 2 * sqid * (4 << NVME_CAP_DSTRD(n->bar.cap));
-		printf("Coperd,%s,set sq[%d].db_addr=%ld,ei_addr=%ld\n", __func__, sqid, sq->db_addr, sq->ei_addr);
 	}
 
     assert(n->cq[cqid]);
@@ -586,11 +585,9 @@ static void nvme_init_cq(NvmeCQueue *cq, NvmeCtrl *n, uint64_t dma_addr,
 	cq->head = cq->tail = 0;
 	QTAILQ_INIT(&cq->req_list);
 	QTAILQ_INIT(&cq->sq_list);
-	printf("Coperd,DSTRD=%ld\n", NVME_CAP_DSTRD(n->bar.cap));
 	if (cqid && n->dbbuf_dbs && n->dbbuf_eis) {
 		cq->db_addr = n->dbbuf_dbs + (2 * cqid + 1) * (4 << NVME_CAP_DSTRD(n->bar.cap));
 		cq->ei_addr = n->dbbuf_eis + (2 * cqid + 1) * (4 << NVME_CAP_DSTRD(n->bar.cap));
-		printf("Coperd,%s,set cq[%d].db_addr=%ld,ei_addr=%ld\n", __func__, cqid, cq->db_addr, cq->ei_addr);
 	}
 	msix_vector_use(&n->parent_obj, cq->vector);
 	n->cq[cqid] = cq;
@@ -603,21 +600,16 @@ static uint16_t nvme_dbbuf_config(NvmeCtrl *n, const NvmeCmd *cmd)
 	uint64_t ei_addr = le64_to_cpu(cmd->prp2);
 	int i;
 
-	printf("Coperd,%s ============START!==============\n", __func__);
 	/* Address should not be NULL and should be page aligned */
 	if (db_addr == 0 || db_addr & (n->page_size - 1) ||
 			ei_addr == 0 || ei_addr & (n->page_size - 1)) {
-		printf("Coperd,db_addr ERROR!\n");
 		return NVME_INVALID_MEMORY_ADDRESS | NVME_DNR;
 	}
 
+	/* Save shadow buffer base addr for use during queue creation */
 	n->dbbuf_dbs = db_addr;
 	n->dbbuf_eis = ei_addr;
-	//return NVME_SUCCESS;
 
-	/* This assumes all I/O queues are created before this command is handled.
-	 * We skip the admin queues.
-	 */
 	for (i = 1; i < n->num_queues; i++) {
 		NvmeSQueue *sq = n->sq[i];
 		NvmeCQueue *cq = n->cq[i];
@@ -625,18 +617,15 @@ static uint16_t nvme_dbbuf_config(NvmeCtrl *n, const NvmeCmd *cmd)
 		if (sq) {
 			/* Submission queue tail pointer location, 2 * QID * stride */
 			sq->db_addr = db_addr + 2 * i * (4 << NVME_CAP_DSTRD(n->bar.cap));
-			sq->ei_addr = ei_addr + 2 * i * 4;
-			printf("Coperd,%s,set sq[%d].db_addr=%ld,ei_addr=%ld\n", __func__, i, sq->db_addr, sq->ei_addr);
+			sq->ei_addr = ei_addr + 2 * i * (4 << NVME_CAP_DSTRD(n->bar.cap));
 		}
 
 		if (cq) {
 			/* Completion queue head pointer location, (2 * QID + 1) * stride */
-			cq->db_addr = db_addr + (2 * i + 1) * 4;
+			cq->db_addr = db_addr + (2 * i + 1) * (4 << NVME_CAP_DSTRD(n->bar.cap));
 			cq->ei_addr = ei_addr + (2 * i + 1) * (4 << NVME_CAP_DSTRD(n->bar.cap));
-			printf("Coperd,%s,set cq[%d].db_addr=%ld,ei_addr=%ld\n", __func__, i, cq->db_addr, cq->ei_addr);
 		}
 	}
-	printf("Coperd,%s ============END!================\n", __func__);
 	return NVME_SUCCESS;
 }
 
@@ -747,7 +736,6 @@ static uint16_t nvme_identify(NvmeCtrl *n, NvmeCmd *cmd)
     case 0x00:
         return nvme_identify_ns(n, c);
     case 0x01:
-		printf("Coperd,%s,to do nvme_identify_ctrl\n", __func__);
         return nvme_identify_ctrl(n, c);
     case 0x02:
         return nvme_identify_nslist(n, c);
@@ -807,25 +795,18 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     switch (cmd->opcode) {
     case NVME_ADM_CMD_DELETE_SQ:
-		printf("Coperd,delete_sq\n");
         return nvme_del_sq(n, cmd);
     case NVME_ADM_CMD_CREATE_SQ:
-		printf("Coperd,create_sq\n");
         return nvme_create_sq(n, cmd);
     case NVME_ADM_CMD_DELETE_CQ:
-		printf("Coperd,delete_cq\n");
         return nvme_del_cq(n, cmd);
     case NVME_ADM_CMD_CREATE_CQ:
-		printf("Coperd,create_cq\n");
         return nvme_create_cq(n, cmd);
     case NVME_ADM_CMD_IDENTIFY:
-		printf("Coperd,identify\n");
         return nvme_identify(n, cmd);
     case NVME_ADM_CMD_SET_FEATURES:
-		printf("Coperd,set_feature\n");
         return nvme_set_feature(n, cmd, req);
     case NVME_ADM_CMD_GET_FEATURES:
-		printf("Coperd,get_feature\n");
         return nvme_get_feature(n, cmd, req);
 	case NVME_ADM_CMD_DBBUF_CONFIG:
 		return nvme_dbbuf_config(n, cmd);
@@ -1202,9 +1183,6 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
         }
 
         start_sqs = nvme_cq_full(cq) ? 1 : 0;
-		/* When the mapped pointer memory area is setup, we don't rely on the
-		 * MMIO written values to update the head pointer
-		 */
 		if (!cq->db_addr) {
 			cq->head = new_head;
 		}
@@ -1244,9 +1222,6 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
             return;
         }
 
-		/* When the mapped pointer memory area is setup, we don't rely on the
-		 * MMIO written values to update the tail pointer
-		 */
 		if (!sq->db_addr) {
 			sq->tail = new_tail;
 		}
