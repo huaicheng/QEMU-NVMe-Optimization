@@ -33,8 +33,8 @@ typedef struct NvmeSQueue {
     QTAILQ_HEAD(sq_req_list, NvmeRequest) req_list;
     QTAILQ_HEAD(out_req_list, NvmeRequest) out_req_list;
     QTAILQ_ENTRY(NvmeSQueue) entry;
-	uint64_t	db_addr;
-	uint64_t	ei_addr;
+    uint64_t    db_addr;
+    uint64_t    ei_addr;
 } NvmeSQueue;
 
 typedef struct NvmeCQueue {
@@ -50,8 +50,8 @@ typedef struct NvmeCQueue {
     QEMUTimer   *timer;
     QTAILQ_HEAD(sq_list, NvmeSQueue) sq_list;
     QTAILQ_HEAD(cq_req_list, NvmeRequest) req_list;
-    uint64_t	db_addr;
-    uint64_t	ei_addr;
+    uint64_t    db_addr;
+    uint64_t    ei_addr;
 } NvmeCQueue;
 
 typedef struct NvmeNamespace {
@@ -93,8 +93,8 @@ typedef struct NvmeCtrl {
     NvmeCQueue      admin_cq;
     NvmeIdCtrl      id_ctrl;
 
-    uint64_t		dbbuf_dbs;
-    uint64_t		dbbuf_eis;
+    uint64_t        dbbuf_dbs;
+    uint64_t        dbbuf_eis;
 } NvmeCtrl;
 
 #endif /* HW_NVME_H */

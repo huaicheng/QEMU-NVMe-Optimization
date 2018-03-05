@@ -812,7 +812,7 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return nvme_set_feature(n, cmd, req);
     case NVME_ADM_CMD_GET_FEATURES:
         return nvme_get_feature(n, cmd, req);
-	case NVME_ADM_CMD_DBBUF_CONFIG:
+    case NVME_ADM_CMD_DBBUF_CONFIG:
         return nvme_dbbuf_config(n, cmd);
     default:
         trace_nvme_err_invalid_admin_opc(cmd->opcode);
@@ -824,7 +824,7 @@ static void nvme_update_sq_eventidx(const NvmeSQueue *sq)
 {
     if (sq->ei_addr) {
         pci_dma_write(&sq->ctrl->parent_obj, sq->ei_addr, &sq->tail,
-				sizeof(sq->tail));
+                sizeof(sq->tail));
     }
 }
 
@@ -832,7 +832,7 @@ static void nvme_update_sq_tail(NvmeSQueue *sq)
 {
     if (sq->db_addr) {
         pci_dma_read(&sq->ctrl->parent_obj, sq->db_addr, &sq->tail,
-				sizeof(sq->tail));
+                sizeof(sq->tail));
     }
 }
 
