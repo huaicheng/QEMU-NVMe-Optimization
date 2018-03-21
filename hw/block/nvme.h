@@ -54,6 +54,7 @@ typedef struct NvmeCQueue {
     uint64_t    db_addr;
     uint64_t    ei_addr;
 	EventNotifier notifier;
+	QEMUBH		*bh;
 } NvmeCQueue;
 
 typedef struct NvmeNamespace {
@@ -97,6 +98,7 @@ typedef struct NvmeCtrl {
 
     uint64_t        dbbuf_dbs;
     uint64_t        dbbuf_eis;
+
 } NvmeCtrl;
 
 #endif /* HW_NVME_H */
