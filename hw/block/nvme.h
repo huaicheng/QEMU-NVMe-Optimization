@@ -35,6 +35,7 @@ typedef struct NvmeSQueue {
     QTAILQ_ENTRY(NvmeSQueue) entry;
     uint64_t    db_addr;
     uint64_t    ei_addr;
+	EventNotifier notifier;
 } NvmeSQueue;
 
 typedef struct NvmeCQueue {
@@ -52,6 +53,7 @@ typedef struct NvmeCQueue {
     QTAILQ_HEAD(cq_req_list, NvmeRequest) req_list;
     uint64_t    db_addr;
     uint64_t    ei_addr;
+	EventNotifier notifier;
 } NvmeCQueue;
 
 typedef struct NvmeNamespace {

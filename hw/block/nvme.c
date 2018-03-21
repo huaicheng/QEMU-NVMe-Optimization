@@ -597,6 +597,48 @@ static void nvme_init_cq(NvmeCQueue *cq, NvmeCtrl *n, uint64_t dma_addr,
     cq->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, nvme_post_cqes, cq);
 }
 
+static void nvme_cq_notifier(EventNotifier *e)
+{
+    NvmeCQueue *cq = container_of(e, NvmeCQueue, notifier);
+
+	event_notifier_test_and_clear(&cq->notifier);
+    nvme_post_cqes(cq);
+}
+
+static void nvme_init_cq_eventfd(NvmeCQueue *cq)
+{
+    NvmeCtrl *n = cq->ctrl;
+    uint16_t offset = (cq->cqid * 2 + 1) * (4 << NVME_CAP_DSTRD(n->bar.cap));
+
+    event_notifier_init(&cq->notifier, 0);
+    event_notifier_set_handler(&cq->notifier, nvme_cq_notifier);
+	printf("Coperd,%s,%d,before add_eventfd for CQ (%d,offset=%d)\n", __func__, __LINE__, cq->cqid, offset);
+    memory_region_add_eventfd(&n->iomem,
+        0x1000 + offset, 4, false, 0, &cq->notifier);
+	printf("Coperd,%s,%d,after add_eventfd for CQ\n", __func__, __LINE__);
+}
+
+static void nvme_sq_notifier(EventNotifier *e)
+{
+    NvmeSQueue *sq = container_of(e, NvmeSQueue, notifier);
+
+	event_notifier_test_and_clear(&sq->notifier);
+    nvme_process_sq(sq);
+}
+
+static void nvme_init_sq_eventfd(NvmeSQueue *sq)
+{
+    NvmeCtrl *n = sq->ctrl;
+    uint16_t offset = sq->sqid * 2 * (4 << NVME_CAP_DSTRD(n->bar.cap));
+
+    event_notifier_init(&sq->notifier, 0);
+    event_notifier_set_handler(&sq->notifier, nvme_sq_notifier);
+	printf("Coperd,%s,%d,before add_eventfd for SQ (%d,offset=%d)\n", __func__, __LINE__, sq->sqid, offset);
+    memory_region_add_eventfd(&n->iomem,
+        0x1000 + offset, 4, false, 0, &sq->notifier);
+	printf("Coperd,%s,%d,after add_eventfd for SQ\n", __func__, __LINE__);
+}
+
 static uint16_t nvme_dbbuf_config(NvmeCtrl *n, const NvmeCmd *cmd)
 {
     uint32_t stride = 4 << NVME_CAP_DSTRD(n->bar.cap);
@@ -622,12 +664,14 @@ static uint16_t nvme_dbbuf_config(NvmeCtrl *n, const NvmeCmd *cmd)
             /* Submission queue tail pointer location, 2 * QID * stride */
             sq->db_addr = dbs_addr + 2 * i * stride;
             sq->ei_addr = eis_addr + 2 * i * stride;
+			nvme_init_sq_eventfd(sq);
         }
 
         if (cq) {
             /* Completion queue head pointer location, (2 * QID + 1) * stride */
             cq->db_addr = dbs_addr + (2 * i + 1) * stride;
             cq->ei_addr = eis_addr + (2 * i + 1) * stride;
+			nvme_init_cq_eventfd(cq);
         }
     }
     return NVME_SUCCESS;
