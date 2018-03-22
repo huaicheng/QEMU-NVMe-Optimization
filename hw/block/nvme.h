@@ -2,6 +2,8 @@
 #define HW_NVME_H
 #include "qemu/cutils.h"
 #include "block/nvme.h"
+#include "sysemu/iothread.h"
+#include "qom/object_interfaces.h"
 
 typedef struct NvmeAsyncEvent {
     QSIMPLEQ_ENTRY(NvmeAsyncEvent) entry;
@@ -36,6 +38,7 @@ typedef struct NvmeSQueue {
     uint64_t    db_addr;
     uint64_t    ei_addr;
 	EventNotifier notifier;
+	bool		notifier_created;
 } NvmeSQueue;
 
 typedef struct NvmeCQueue {
@@ -54,7 +57,7 @@ typedef struct NvmeCQueue {
     uint64_t    db_addr;
     uint64_t    ei_addr;
 	EventNotifier notifier;
-	QEMUBH		*bh;
+	bool		notifier_created;
 } NvmeCQueue;
 
 typedef struct NvmeNamespace {
@@ -98,6 +101,10 @@ typedef struct NvmeCtrl {
 
     uint64_t        dbbuf_dbs;
     uint64_t        dbbuf_eis;
+
+	IOThread		*iothread;
+	IOThread		internal_iothread_obj;
+	AioContext		*ctx;
 
 } NvmeCtrl;
 

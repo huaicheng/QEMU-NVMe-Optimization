@@ -262,6 +262,7 @@ static int virtio_pci_ioeventfd_assign(DeviceState *d, EventNotifier *notifier,
             memory_region_add_eventfd(legacy_mr, legacy_addr, 2,
                                       true, n, notifier);
         }
+		printf("Coperd,%s,%d,memory_region_add_eventfd Done\n", __func__, __LINE__);
     } else {
         if (modern) {
             if (fast_mmio) {
@@ -280,6 +281,7 @@ static int virtio_pci_ioeventfd_assign(DeviceState *d, EventNotifier *notifier,
             memory_region_del_eventfd(legacy_mr, legacy_addr, 2,
                                       true, n, notifier);
         }
+		printf("Coperd,%s,%d,memory_region_del_eventfd Done\n", __func__, __LINE__);
     }
     return 0;
 }

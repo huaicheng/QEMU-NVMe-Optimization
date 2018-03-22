@@ -288,10 +288,8 @@ static void nvme_enqueue_req_completion(NvmeCQueue *cq, NvmeRequest *req)
     assert(cq->cqid == req->sq->cqid);
     QTAILQ_REMOVE(&req->sq->out_req_list, req, entry);
     QTAILQ_INSERT_TAIL(&cq->req_list, req, entry);
-	if (cq->timer)
-		timer_mod(cq->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 500);
-	else
-		qemu_bh_schedule(cq->bh);
+
+	nvme_post_cqes(cq);
 }
 
 static void nvme_rw_cb(void *opaque, int ret)
@@ -426,10 +424,6 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 static void nvme_free_sq(NvmeSQueue *sq, NvmeCtrl *n)
 {
     n->sq[sq->sqid] = NULL;
-	if (sq->timer) {
-		timer_del(sq->timer);
-		timer_free(sq->timer);
-	}
     g_free(sq->io_req);
     if (sq->sqid) {
         g_free(sq);
@@ -474,6 +468,72 @@ static uint16_t nvme_del_sq(NvmeCtrl *n, NvmeCmd *cmd)
     return NVME_SUCCESS;
 }
 
+static void nvme_cq_notifier(EventNotifier *e)
+{
+    NvmeCQueue *cq = container_of(e, NvmeCQueue, notifier);
+
+	event_notifier_test_and_clear(&cq->notifier);
+	aio_context_acquire(cq->ctrl->ctx);
+    nvme_post_cqes(cq);
+	aio_context_release(cq->ctrl->ctx);
+}
+
+static void nvme_uninit_cq_eventfd(NvmeCQueue *cq)
+{
+    NvmeCtrl *n = cq->ctrl;
+    uint16_t offset = (cq->cqid * 2 + 1) * (4 << NVME_CAP_DSTRD(n->bar.cap));
+	memory_region_del_eventfd(&n->iomem,
+			0x1000 + offset, 4, false, 0, &cq->notifier);
+	event_notifier_cleanup(&cq->notifier);
+	printf("Coperd, cq[%d] eventfd uninited!\n", cq->cqid);
+}
+
+static void nvme_init_cq_eventfd(NvmeCQueue *cq)
+{
+    NvmeCtrl *n = cq->ctrl;
+    uint16_t offset = (cq->cqid * 2 + 1) * (4 << NVME_CAP_DSTRD(n->bar.cap));
+
+    event_notifier_init(&cq->notifier, 0);
+    //event_notifier_set_handler(&cq->notifier, nvme_cq_notifier);
+	printf("Coperd,%s,%d,before add_eventfd for CQ (%d,offset=%d)\n", __func__, __LINE__, cq->cqid, offset);
+    memory_region_add_eventfd(&n->iomem,
+        0x1000 + offset, 4, false, 0, &cq->notifier);
+	printf("Coperd,%s,%d,after add_eventfd for CQ\n", __func__, __LINE__);
+}
+
+static void nvme_sq_notifier(EventNotifier *e)
+{
+    NvmeSQueue *sq = container_of(e, NvmeSQueue, notifier);
+
+	event_notifier_test_and_clear(&sq->notifier);
+	aio_context_acquire(sq->ctrl->ctx);
+    nvme_process_sq(sq);
+	aio_context_release(sq->ctrl->ctx);
+}
+
+static void nvme_uninit_sq_eventfd(NvmeSQueue *sq)
+{
+    NvmeCtrl *n = sq->ctrl;
+    uint16_t offset = sq->sqid * 2 * (4 << NVME_CAP_DSTRD(n->bar.cap));
+	memory_region_del_eventfd(&n->iomem,
+			0x1000 + offset, 4, false, 0, &sq->notifier);
+	event_notifier_cleanup(&sq->notifier);
+	printf("Coperd, sq[%d] eventfd uninited!\n", sq->sqid);
+}
+
+static void nvme_init_sq_eventfd(NvmeSQueue *sq)
+{
+    NvmeCtrl *n = sq->ctrl;
+    uint16_t offset = sq->sqid * 2 * (4 << NVME_CAP_DSTRD(n->bar.cap));
+
+    event_notifier_init(&sq->notifier, 0);
+    event_notifier_set_handler(&sq->notifier, nvme_sq_notifier);
+	printf("Coperd,%s,%d,before add_eventfd for SQ (%d,offset=%d)\n", __func__, __LINE__, sq->sqid, offset);
+    memory_region_add_eventfd(&n->iomem,
+        0x1000 + offset, 4, false, 0, &sq->notifier);
+	printf("Coperd,%s,%d,after add_eventfd for SQ\n", __func__, __LINE__);
+}
+
 static void nvme_init_sq(NvmeSQueue *sq, NvmeCtrl *n, uint64_t dma_addr,
     uint16_t sqid, uint16_t cqid, uint16_t size)
 {
@@ -495,8 +555,6 @@ static void nvme_init_sq(NvmeSQueue *sq, NvmeCtrl *n, uint64_t dma_addr,
         sq->io_req[i].sq = sq;
         QTAILQ_INSERT_TAIL(&(sq->req_list), &sq->io_req[i], entry);
     }
-	if (!sqid)
-		sq->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, nvme_process_sq, sq);
 
     if (sqid && n->dbbuf_dbs && n->dbbuf_eis) {
         sq->db_addr = n->dbbuf_dbs + 2 * sqid * stride;
@@ -507,6 +565,17 @@ static void nvme_init_sq(NvmeSQueue *sq, NvmeCtrl *n, uint64_t dma_addr,
     cq = n->cq[cqid];
     QTAILQ_INSERT_TAIL(&(cq->sq_list), sq, entry);
     n->sq[sqid] = sq;
+
+	return;
+
+	if (!sq->notifier_created) {
+		nvme_init_sq_eventfd(sq);
+		sq->notifier_created = true;
+	} else {
+		nvme_uninit_sq_eventfd(sq);
+		nvme_init_sq_eventfd(sq);
+		sq->notifier_created = true;
+	}
 }
 
 static uint16_t nvme_create_sq(NvmeCtrl *n, NvmeCmd *cmd)
@@ -520,6 +589,7 @@ static uint16_t nvme_create_sq(NvmeCtrl *n, NvmeCmd *cmd)
     uint16_t qflags = le16_to_cpu(c->sq_flags);
     uint64_t prp1 = le64_to_cpu(c->prp1);
 
+	printf("Coperd,create_sq,%d\n", sqid);
     trace_nvme_create_sq(prp1, sqid, cqid, qsize, qflags);
 
     if (unlikely(!cqid || nvme_check_cqid(n, cqid))) {
@@ -550,10 +620,6 @@ static uint16_t nvme_create_sq(NvmeCtrl *n, NvmeCmd *cmd)
 static void nvme_free_cq(NvmeCQueue *cq, NvmeCtrl *n)
 {
     n->cq[cq->cqid] = NULL;
-	if (cq->timer) {
-		timer_del(cq->timer);
-		timer_free(cq->timer);
-	}
     msix_vector_unuse(&n->parent_obj, cq->vector);
     if (cq->cqid) {
         g_free(cq);
@@ -602,51 +668,31 @@ static void nvme_init_cq(NvmeCQueue *cq, NvmeCtrl *n, uint64_t dma_addr,
     }
     msix_vector_use(&n->parent_obj, cq->vector);
     n->cq[cqid] = cq;
-	if (!cqid)
-		cq->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, nvme_post_cqes, cq);
+
+	return;
+
+	if (!cq->notifier_created) {
+		nvme_init_cq_eventfd(cq);
+		cq->notifier_created = true;
+	} else {
+		nvme_uninit_cq_eventfd(cq);
+		nvme_init_cq_eventfd(cq);
+		cq->notifier_created = true;
+	}
 }
 
-static void nvme_cq_notifier(EventNotifier *e)
+static void nvme_init_iothread(NvmeCtrl *n)
 {
-    NvmeCQueue *cq = container_of(e, NvmeCQueue, notifier);
+	//object_initialize(&n->internal_iothread_obj,
+			//sizeof(n->internal_iothread_obj),
+			//TYPE_IOTHREAD);
+	//user_creatable_complete(OBJECT(&n->internal_iothread_obj), &error_abort);
+	//n->iothread = &n->internal_iothread_obj;
+	printf("Coperd,%s,%d,n->iothread=%p\n", __func__, __LINE__, n->iothread);
+	object_ref(OBJECT(n->iothread));
+	n->ctx = iothread_get_aio_context(n->iothread);
 
-	event_notifier_test_and_clear(&cq->notifier);
-    //nvme_post_cqes(cq);
-	qemu_bh_schedule(cq->bh);
-}
-
-static void nvme_init_cq_eventfd(NvmeCQueue *cq)
-{
-    NvmeCtrl *n = cq->ctrl;
-    uint16_t offset = (cq->cqid * 2 + 1) * (4 << NVME_CAP_DSTRD(n->bar.cap));
-
-    event_notifier_init(&cq->notifier, 0);
-    event_notifier_set_handler(&cq->notifier, nvme_cq_notifier);
-	printf("Coperd,%s,%d,before add_eventfd for CQ (%d,offset=%d)\n", __func__, __LINE__, cq->cqid, offset);
-    memory_region_add_eventfd(&n->iomem,
-        0x1000 + offset, 4, false, 0, &cq->notifier);
-	printf("Coperd,%s,%d,after add_eventfd for CQ\n", __func__, __LINE__);
-}
-
-static void nvme_sq_notifier(EventNotifier *e)
-{
-    NvmeSQueue *sq = container_of(e, NvmeSQueue, notifier);
-
-	event_notifier_test_and_clear(&sq->notifier);
-    nvme_process_sq(sq);
-}
-
-static void nvme_init_sq_eventfd(NvmeSQueue *sq)
-{
-    NvmeCtrl *n = sq->ctrl;
-    uint16_t offset = sq->sqid * 2 * (4 << NVME_CAP_DSTRD(n->bar.cap));
-
-    event_notifier_init(&sq->notifier, 0);
-    event_notifier_set_handler(&sq->notifier, nvme_sq_notifier);
-	printf("Coperd,%s,%d,before add_eventfd for SQ (%d,offset=%d)\n", __func__, __LINE__, sq->sqid, offset);
-    memory_region_add_eventfd(&n->iomem,
-        0x1000 + offset, 4, false, 0, &sq->notifier);
-	printf("Coperd,%s,%d,after add_eventfd for SQ\n", __func__, __LINE__);
+	blk_set_aio_context(n->conf.blk, n->ctx);
 }
 
 static uint16_t nvme_dbbuf_config(NvmeCtrl *n, const NvmeCmd *cmd)
@@ -654,6 +700,7 @@ static uint16_t nvme_dbbuf_config(NvmeCtrl *n, const NvmeCmd *cmd)
     uint32_t stride = 4 << NVME_CAP_DSTRD(n->bar.cap);
     uint64_t dbs_addr = le64_to_cpu(cmd->prp1);
     uint64_t eis_addr = le64_to_cpu(cmd->prp2);
+	uint16_t offset;
     int i;
 
     /* Address should not be NULL and should be page aligned */
@@ -674,16 +721,43 @@ static uint16_t nvme_dbbuf_config(NvmeCtrl *n, const NvmeCmd *cmd)
             /* Submission queue tail pointer location, 2 * QID * stride */
             sq->db_addr = dbs_addr + 2 * i * stride;
             sq->ei_addr = eis_addr + 2 * i * stride;
-			nvme_init_sq_eventfd(sq);
+			//nvme_init_sq_eventfd(sq);
         }
 
         if (cq) {
             /* Completion queue head pointer location, (2 * QID + 1) * stride */
             cq->db_addr = dbs_addr + (2 * i + 1) * stride;
             cq->ei_addr = eis_addr + (2 * i + 1) * stride;
-			nvme_init_cq_eventfd(cq);
+			//nvme_init_cq_eventfd(cq);
         }
     }
+	/* Coperd: setup iothread */
+	printf("Coperd, about to call nvme_init_iothread\n");
+	nvme_init_iothread(n);
+    for (i = 1; i < n->num_queues; i++) {
+        NvmeSQueue *sq = n->sq[i];
+        NvmeCQueue *cq = n->cq[i];
+		if (sq) {
+			offset = sq->sqid * 2 * (4 << NVME_CAP_DSTRD(n->bar.cap));
+			event_notifier_init(&sq->notifier, 0);
+			memory_region_add_eventfd(&n->iomem,
+					         0x1000 + offset, 4, false, 0, &sq->notifier);
+			aio_context_acquire(n->ctx);
+			aio_set_event_notifier(n->ctx, &sq->notifier, false,
+					nvme_sq_notifier, NULL);
+			aio_context_release(n->ctx);
+		}
+		if (cq) {
+			offset = (cq->cqid*2+1) * (4 << NVME_CAP_DSTRD(n->bar.cap));
+			event_notifier_init(&cq->notifier, 0);
+			memory_region_add_eventfd(&n->iomem,
+					0x1000 + offset, 4, false, 0, &cq->notifier);
+			aio_context_acquire(n->ctx);
+			aio_set_event_notifier(n->ctx, &cq->notifier, false,
+					nvme_cq_notifier, NULL);
+			aio_context_release(n->ctx);
+		}
+	}
     return NVME_SUCCESS;
 }
 
@@ -696,6 +770,8 @@ static uint16_t nvme_create_cq(NvmeCtrl *n, NvmeCmd *cmd)
     uint16_t qsize = le16_to_cpu(c->qsize);
     uint16_t qflags = le16_to_cpu(c->cq_flags);
     uint64_t prp1 = le64_to_cpu(c->prp1);
+
+	printf("Coperd,create_cq,%d\n", cqid);
 
     trace_nvme_create_cq(prp1, cqid, vector, qsize, qflags,
                          NVME_CQ_FLAGS_IEN(qflags) != 0);
@@ -724,9 +800,7 @@ static uint16_t nvme_create_cq(NvmeCtrl *n, NvmeCmd *cmd)
     cq = g_malloc0(sizeof(*cq));
     nvme_init_cq(cq, n, prp1, cqid, vector, qsize + 1,
         NVME_CQ_FLAGS_IEN(qflags));
-
-	if (!cq->bh)
-		cq->bh = qemu_bh_new(nvme_post_cqes, cq);
+	
 
     return NVME_SUCCESS;
 }
@@ -857,22 +931,31 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     switch (cmd->opcode) {
     case NVME_ADM_CMD_DELETE_SQ:
+		printf("Coperd,%s,%d,del_sq\n", __func__, __LINE__);
         return nvme_del_sq(n, cmd);
     case NVME_ADM_CMD_CREATE_SQ:
+		printf("Coperd,%s,%d,create_sq\n", __func__, __LINE__);
         return nvme_create_sq(n, cmd);
     case NVME_ADM_CMD_DELETE_CQ:
+		printf("Coperd,%s,%d,del_cq\n", __func__, __LINE__);
         return nvme_del_cq(n, cmd);
     case NVME_ADM_CMD_CREATE_CQ:
+		printf("Coperd,%s,%d,create_cq\n", __func__, __LINE__);
         return nvme_create_cq(n, cmd);
     case NVME_ADM_CMD_IDENTIFY:
+		printf("Coperd,%s,%d,identify\n", __func__, __LINE__);
         return nvme_identify(n, cmd);
     case NVME_ADM_CMD_SET_FEATURES:
+		printf("Coperd,%s,%d,set_features\n", __func__, __LINE__);
         return nvme_set_feature(n, cmd, req);
     case NVME_ADM_CMD_GET_FEATURES:
+		printf("Coperd,%s,%d,get_features\n", __func__, __LINE__);
         return nvme_get_feature(n, cmd, req);
     case NVME_ADM_CMD_DBBUF_CONFIG:
+		printf("Coperd,%s,%d,dbbuf_config\n", __func__, __LINE__);
         return nvme_dbbuf_config(n, cmd);
     default:
+		printf("Coperd,%s,%d,invalid admin cmd (0x%x\n", __func__, __LINE__, cmd->opcode);
         trace_nvme_err_invalid_admin_opc(cmd->opcode);
         return NVME_INVALID_OPCODE | NVME_DNR;
     }
@@ -896,6 +979,7 @@ static void nvme_update_sq_tail(NvmeSQueue *sq)
 
 static void nvme_process_sq(void *opaque)
 {
+	printf("Coperd,%s,in Thread [%ld]\n", __func__, (long)qemu_get_thread_id());
     NvmeSQueue *sq = opaque;
     NvmeCtrl *n = sq->ctrl;
     NvmeCQueue *cq = n->cq[sq->cqid];
@@ -1036,6 +1120,7 @@ static int nvme_start_ctrl(NvmeCtrl *n)
     n->sqe_size = 1 << NVME_CC_IOSQES(n->bar.cc);
     nvme_init_cq(&n->admin_cq, n, n->bar.acq, 0, 0,
         NVME_AQA_ACQS(n->bar.aqa) + 1, 1);
+	printf("Coperd,%s,nvme_init_sq/cq,admin\n", __func__);
     nvme_init_sq(&n->admin_sq, n, n->bar.asq, 0, 0,
         NVME_AQA_ASQS(n->bar.aqa) + 1);
 
@@ -1251,11 +1336,10 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
         if (start_sqs) {
             NvmeSQueue *sq;
             QTAILQ_FOREACH(sq, &cq->sq_list, entry) {
-				if (sq->timer)
-					timer_mod(sq->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 500);
+				nvme_process_sq(sq);
+				printf("Coperd,%s,not expecting to run nvme_process_sq here!\n", __func__);
             }
-			if (cq->timer)
-				timer_mod(cq->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 500);
+			nvme_post_cqes(cq);
         }
 
         if (cq->tail == cq->head) {
@@ -1289,8 +1373,8 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
         if (!sq->db_addr) {
             sq->tail = new_tail;
         }
-		if (sq->timer)
-			timer_mod(sq->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 500);
+		nvme_process_sq(sq);
+		printf("Coperd,%s,not expecting here to do nvme_process_sq(), qid=%d\n", __func__, qid);
     }
 }
 
@@ -1491,6 +1575,7 @@ static Property nvme_props[] = {
     DEFINE_BLOCK_PROPERTIES(NvmeCtrl, conf),
     DEFINE_PROP_STRING("serial", NvmeCtrl, serial),
     DEFINE_PROP_UINT32("cmb_size_mb", NvmeCtrl, cmb_size_mb, 0),
+    DEFINE_PROP_LINK("iothread", NvmeCtrl, iothread, TYPE_IOTHREAD, IOThread *),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -1520,6 +1605,7 @@ static void nvme_class_init(ObjectClass *oc, void *data)
 static void nvme_instance_init(Object *obj)
 {
     NvmeCtrl *s = NVME(obj);
+
 
     device_add_bootindex_property(obj, &s->conf.bootindex,
                                   "bootindex", "/namespace@1,0",

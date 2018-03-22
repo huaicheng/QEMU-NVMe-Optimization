@@ -3070,6 +3070,7 @@ int main(int argc, char **argv, char **envp)
     QSIMPLEQ_HEAD(, BlockdevOptions_queue) bdo_queue
         = QSIMPLEQ_HEAD_INITIALIZER(bdo_queue);
 
+	printf("Coperd,QEMU Main Thread [%ld]\n", (long)qemu_get_thread_id());
     module_call_init(MODULE_INIT_TRACE);
 
     qemu_init_cpu_list();

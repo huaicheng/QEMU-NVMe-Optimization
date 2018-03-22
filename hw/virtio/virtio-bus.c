@@ -279,7 +279,10 @@ int virtio_bus_set_host_notifier(VirtioBusState *bus, int n, bool assign)
             error_report("%s: unable to init event notifier: %s (%d)",
                          __func__, strerror(-r), r);
             return r;
-        }
+        } else {
+			printf("Coperd,%s,%d,event_notifier_init SUCCESS\n", __func__, __LINE__);
+		}
+		/* Coperd: virtio_pci_ioeventfd_assign() */
         r = k->ioeventfd_assign(proxy, notifier, n, true);
         if (r < 0) {
             error_report("%s: unable to assign ioeventfd: %d", __func__, r);
