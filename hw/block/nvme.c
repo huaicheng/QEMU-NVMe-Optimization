@@ -511,6 +511,30 @@ static void nvme_sq_notifier(EventNotifier *e)
 	aio_context_release(sq->ctrl->ctx);
 }
 
+static bool nvme_sq_notifier_poll(void *opaque)
+{
+	EventNotifier *e = (EventNotifier *)opaque;
+    NvmeSQueue *sq = container_of(e, NvmeSQueue, notifier);
+
+	event_notifier_test_and_clear(&sq->notifier);
+	aio_context_acquire(sq->ctrl->ctx);
+	//printf("Coperd,%s,%" PRIu64 ",in Thread [%ld]\n", __func__, (long)qemu_get_thread_id(),qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
+    nvme_process_sq(sq);
+	aio_context_release(sq->ctrl->ctx);
+
+	return true;
+}
+
+static void nvme_sq_notifier_poll_begin(EventNotifier *e)
+{
+	return;
+}
+
+static void nvme_sq_notifier_poll_end(EventNotifier *e)
+{
+	return;
+}
+
 static void nvme_uninit_sq_eventfd(NvmeSQueue *sq)
 {
     NvmeCtrl *n = sq->ctrl;
@@ -744,7 +768,10 @@ static uint16_t nvme_dbbuf_config(NvmeCtrl *n, const NvmeCmd *cmd)
 					         0x1000 + offset, 4, false, 0, &sq->notifier);
 			aio_context_acquire(n->ctx);
 			aio_set_event_notifier(n->ctx, &sq->notifier, false,
-					nvme_sq_notifier, NULL);
+					nvme_sq_notifier, nvme_sq_notifier_poll);
+			aio_set_event_notifier_poll(n->ctx, &sq->notifier,
+					nvme_sq_notifier_poll_begin,
+					nvme_sq_notifier_poll_end);
 			aio_context_release(n->ctx);
 		}
 		if (cq) {
@@ -979,7 +1006,7 @@ static void nvme_update_sq_tail(NvmeSQueue *sq)
 
 static void nvme_process_sq(void *opaque)
 {
-	printf("Coperd,%s,in Thread [%ld]\n", __func__, (long)qemu_get_thread_id());
+	//printf("Coperd,%s,in Thread [%ld]\n", __func__, (long)qemu_get_thread_id());
     NvmeSQueue *sq = opaque;
     NvmeCtrl *n = sq->ctrl;
     NvmeCQueue *cq = n->cq[sq->cqid];
